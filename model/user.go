@@ -305,6 +305,21 @@ func GetUserById(id int, selectAll bool) (*User, error) {
 	return &user, err
 }
 
+func GetUserByUsername(username string, selectAll bool) (*User, error) {
+	username = strings.TrimSpace(username)
+	if username == "" {
+		return nil, errors.New("username 为空！")
+	}
+	user := User{}
+	var err error
+	if selectAll {
+		err = DB.Where("username = ?", username).First(&user).Error
+	} else {
+		err = DB.Omit("password").Where("username = ?", username).First(&user).Error
+	}
+	return &user, err
+}
+
 func GetUserIdByAffCode(affCode string) (int, error) {
 	if affCode == "" {
 		return 0, errors.New("affCode 为空！")
@@ -402,19 +417,8 @@ func (user *User) Insert(inviterId int) error {
 		return result.Error
 	}
 
-	// 用户创建成功后，根据角色初始化边栏配置
-	// 需要重新获取用户以确保有正确的ID和Role
-	var createdUser User
-	if err := DB.Where("username = ?", user.Username).First(&createdUser).Error; err == nil {
-		// 生成基于角色的默认边栏配置
-		defaultSidebarConfig := generateDefaultSidebarConfigForRole(createdUser.Role)
-		if defaultSidebarConfig != "" {
-			currentSetting := createdUser.GetSetting()
-			currentSetting.SidebarModules = defaultSidebarConfig
-			createdUser.SetSetting(currentSetting)
-			createdUser.Update(false)
-			common.SysLog(fmt.Sprintf("为新用户 %s (角色: %d) 初始化边栏配置", createdUser.Username, createdUser.Role))
-		}
+	if err := InitializeUserSidebarConfig(user.Id); err != nil {
+		common.SysLog(fmt.Sprintf("为新用户 %s 初始化边栏配置失败: %s", user.Username, err.Error()))
 	}
 
 	if common.QuotaForNewUser > 0 {
@@ -431,6 +435,32 @@ func (user *User) Insert(inviterId int) error {
 			_ = inviteUser(inviterId)
 		}
 	}
+	return nil
+}
+
+func InitializeUserSidebarConfig(userId int) error {
+	if userId == 0 {
+		return errors.New("user id 为空！")
+	}
+
+	var createdUser User
+	if err := DB.Where("id = ?", userId).First(&createdUser).Error; err != nil {
+		return err
+	}
+
+	defaultSidebarConfig := generateDefaultSidebarConfigForRole(createdUser.Role)
+	if defaultSidebarConfig == "" {
+		return nil
+	}
+
+	currentSetting := createdUser.GetSetting()
+	currentSetting.SidebarModules = defaultSidebarConfig
+	createdUser.SetSetting(currentSetting)
+	if err := createdUser.Update(false); err != nil {
+		return err
+	}
+
+	common.SysLog(fmt.Sprintf("为新用户 %s (角色: %d) 初始化边栏配置", createdUser.Username, createdUser.Role))
 	return nil
 }
 
@@ -465,17 +495,8 @@ func (user *User) InsertWithTx(tx *gorm.DB, inviterId int) error {
 // FinalizeOAuthUserCreation performs post-transaction tasks for OAuth user creation.
 // This should be called after the transaction commits successfully.
 func (user *User) FinalizeOAuthUserCreation(inviterId int) {
-	// 用户创建成功后，根据角色初始化边栏配置
-	var createdUser User
-	if err := DB.Where("id = ?", user.Id).First(&createdUser).Error; err == nil {
-		defaultSidebarConfig := generateDefaultSidebarConfigForRole(createdUser.Role)
-		if defaultSidebarConfig != "" {
-			currentSetting := createdUser.GetSetting()
-			currentSetting.SidebarModules = defaultSidebarConfig
-			createdUser.SetSetting(currentSetting)
-			createdUser.Update(false)
-			common.SysLog(fmt.Sprintf("为新用户 %s (角色: %d) 初始化边栏配置", createdUser.Username, createdUser.Role))
-		}
+	if err := InitializeUserSidebarConfig(user.Id); err != nil {
+		common.SysLog(fmt.Sprintf("为新用户 %d 初始化边栏配置失败: %s", user.Id, err.Error()))
 	}
 
 	if common.QuotaForNewUser > 0 {
